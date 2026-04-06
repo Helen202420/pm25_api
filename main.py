@@ -26,7 +26,7 @@ supabase: Client = create_client(
 MOENV_API_KEY = os.getenv("MOENV_API_KEY")
 CRON_SECRET = os.getenv("CRON_SECRET")
 
-# --- 功能一：定時同步 (修正 List 格式問題) ---
+# --- 功能一：定時同步 (僅篩選 桃園市-中壢 測站資料) ---
 @app.get("/api/cron/sync")
 async def sync_data(key: str = Query(None)):
     # 1. 安全性檢查
@@ -63,25 +63,30 @@ async def sync_data(key: str = Query(None)):
     if not records:
         return {"status": "warning", "message": "未抓取到任何資料記錄"}
 
-    # 3. 處理資料格式與轉換
+    # 3. 處理資料格式與「桃園市-中壢站」篩選
     to_upsert = []
     for r in records:
-        try:
-            # 處理 PM2.5 數值轉換，若為空字串或無效值則設為 0
-            pm_val = r.get("pm25")
-            val = float(pm_val) if pm_val and str(pm_val).strip() else 0
-        except (ValueError, TypeError):
-            val = 0
-            
-        to_upsert.append({
-            "site": r.get("site"),
-            "county": r.get("county"),
-            "pm25": val,
-            "datacreationdate": r.get("datacreationdate"),
-            "itemunit": r.get("itemunit")
-        })
+        # --- 核心修改：精確篩選縣市為「桃園市」且測站為「中壢」 ---
+        if r.get("county") == "桃園市" and r.get("site") == "中壢":
+            try:
+                # 處理 PM2.5 數值轉換，若為空字串或無效值則設為 0
+                pm_val = r.get("pm25")
+                val = float(pm_val) if pm_val and str(pm_val).strip() else 0
+            except (ValueError, TypeError):
+                val = 0
+                
+            to_upsert.append({
+                "site": r.get("site"),
+                "county": r.get("county"),
+                "pm25": val,
+                "datacreationdate": r.get("datacreationdate"),
+                "itemunit": r.get("itemunit")
+            })
 
     # 4. 寫入 Supabase (使用 upsert 避免重複)
+    if not to_upsert:
+        return {"status": "success", "synced_count": 0, "message": "本次抓取無桃園市中壢測站資料"}
+
     try:
         supabase.table("pm25_data").upsert(
             to_upsert, 
@@ -91,7 +96,7 @@ async def sync_data(key: str = Query(None)):
         return {
             "status": "success", 
             "synced_count": len(to_upsert),
-            "message": "資料同步完成"
+            "message": "中壢測站資料同步完成"
         }
     except Exception as e:
         return {"status": "error", "message": f"Supabase 寫入失敗: {str(e)}"}
