@@ -1,6 +1,6 @@
 import os
 import httpx
-from fastapi import FastAPI, HTTPException, Query, Depends
+from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from supabase import create_client, Client
 from dotenv import load_dotenv
@@ -24,11 +24,9 @@ supabase: Client = create_client(
 )
 
 MOENV_API_KEY = os.getenv("MOENV_API_KEY")
-# 從環境變數讀取自定義的 Cron 金鑰
 CRON_SECRET = os.getenv("CRON_SECRET")
 
-# --- 功能一：定時同步 (修改後支援 Cron-job.org 驗證) ---
-# 用法: /api/cron/sync?key=你的金鑰
+# --- 功能一：定時同步 (修正 List 格式問題) ---
 @app.get("/api/cron/sync")
 async def sync_data(key: str = Query(None)):
     # 1. 安全性檢查
@@ -43,35 +41,48 @@ async def sync_data(key: str = Query(None)):
     
     async with httpx.AsyncClient() as client:
         try:
-            response = await client.get(url, timeout=20.0) # 設定超時防止卡死
+            response = await client.get(url, timeout=30.0)
             if response.status_code != 200:
-                raise HTTPException(status_code=500, detail="環境部 API 連線失敗")
+                raise HTTPException(status_code=500, detail=f"環境部 API 連線失敗: {response.status_code}")
             
-            data = response.json()
-            records = data.get("records", [])
+            # 取得原始資料
+            raw_data = response.json()
+            
+            # --- 重點修正：判斷回傳格式 ---
+            # 如果 raw_data 本身就是 list，直接使用；如果是 dict，嘗試抓取 'records'
+            if isinstance(raw_data, list):
+                records = raw_data
+            elif isinstance(raw_data, dict):
+                records = raw_data.get("records", [])
+            else:
+                records = []
+                
         except Exception as e:
             raise HTTPException(status_code=500, detail=f"抓取過程出錯: {str(e)}")
 
-    # 3. 處理資料格式
+    if not records:
+        return {"status": "warning", "message": "未抓取到任何資料記錄"}
+
+    # 3. 處理資料格式與轉換
     to_upsert = []
     for r in records:
         try:
-            # 處理可能出現的空字串或無效值
-            val = float(r["pm25"]) if r.get("pm25") and r["pm25"].strip() else 0
+            # 處理 PM2.5 數值轉換，若為空字串或無效值則設為 0
+            pm_val = r.get("pm25")
+            val = float(pm_val) if pm_val and str(pm_val).strip() else 0
         except (ValueError, TypeError):
             val = 0
             
         to_upsert.append({
-            "site": r["site"],
-            "county": r["county"],
+            "site": r.get("site"),
+            "county": r.get("county"),
             "pm25": val,
-            "datacreationdate": r["datacreationdate"],
-            "itemunit": r["itemunit"]
+            "datacreationdate": r.get("datacreationdate"),
+            "itemunit": r.get("itemunit")
         })
 
     # 4. 寫入 Supabase (使用 upsert 避免重複)
     try:
-        # 確保你的 pm25_data 表格有設定 site 和 datacreationdate 的唯一約束 (Unique Constraint)
         supabase.table("pm25_data").upsert(
             to_upsert, 
             on_conflict="site,datacreationdate"
@@ -91,10 +102,8 @@ async def sync_data(key: str = Query(None)):
 def get_latest(site: str = None):
     try:
         query = supabase.table("pm25_data").select("*").order("datacreationdate", desc=True)
-        
         if site:
             query = query.eq("site", site)
-            
         result = query.limit(1).execute()
         
         if not result.data:
@@ -109,7 +118,6 @@ def get_latest(site: str = None):
 def get_history(site: str):
     if not site:
         raise HTTPException(status_code=400, detail="必須提供測站名稱(site)")
-        
     try:
         result = supabase.table("pm25_data") \
             .select("*") \
@@ -117,7 +125,6 @@ def get_history(site: str):
             .order("datacreationdate", desc=True) \
             .limit(24) \
             .execute()
-            
         return result.data
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
